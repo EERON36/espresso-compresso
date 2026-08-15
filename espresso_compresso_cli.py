@@ -31,6 +31,16 @@ EFFICIENT_CODECS = {"av1", "hevc", "h265", "vp9"}
 SUPPORTED_FPS = {5, 10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60}
 
 
+def child_process_options(platform: str, *, grouped: bool = False) -> dict[str, int | bool]:
+    """Return platform-safe options for a child process without starting one."""
+    if platform == "nt":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if grouped:
+            flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": flags}
+    return {"start_new_session": True} if grouped else {}
+
+
 @dataclass(frozen=True)
 class ModeConfig:
     name: str
@@ -248,7 +258,7 @@ def command_text(command: list[str], timeout: int = 20) -> tuple[int, str]:
     """Run a harmless tool-information command and return combined text."""
     result = subprocess.run(
         command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, check=False,
+        timeout=timeout, check=False, **child_process_options(os.name),
     )
     return result.returncode, (result.stdout + "\n" + result.stderr).strip()
 
@@ -378,7 +388,10 @@ def probe_with_ffprobe(ffprobe: Path, path: Path) -> MediaInfo:
         str(ffprobe), "-v", "error", "-print_format", "json",
         "-show_format", "-show_streams", str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=90, check=False,
+        **child_process_options(os.name),
+    )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"ffprobe exited with {result.returncode}")
     data = json.loads(result.stdout)
@@ -417,7 +430,10 @@ def extract_json_after_marker(text: str, marker: str) -> dict:
 
 def probe_with_handbrake(handbrake: Path, path: Path) -> MediaInfo:
     command = [str(handbrake), "--input", str(path), "--scan", "--json"]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=120, check=False,
+        **child_process_options(os.name),
+    )
     data = extract_json_after_marker(result.stdout + "\n" + result.stderr, "JSON Title Set:")
     titles = data.get("TitleList", [])
     if not titles:
@@ -567,14 +583,10 @@ def run_encode(command: list[str], logger: BatchLogger) -> tuple[int, list[str]]
     recent: deque[str] = deque(maxlen=80)
     progress_was_shown = False
     last_progress = ""
-    popen_options: dict[str, object] = {}
-    if os.name == "nt":
-        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_options["start_new_session"] = True
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        encoding="utf-8", errors="replace", bufsize=1, **popen_options,
+        encoding="utf-8", errors="replace", bufsize=1,
+        **child_process_options(os.name, grouped=True),
     )
     try:
         assert process.stdout is not None
@@ -637,7 +649,7 @@ def decode_integrity(ffmpeg: Path, output: Path, duration: float) -> tuple[bool,
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, check=False,
+            timeout=timeout, check=False, **child_process_options(os.name),
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return False, f"integrity decode could not complete: {error}"

@@ -9,10 +9,12 @@ from unittest.mock import patch
 
 import espresso_compresso_cli as cli
 from espresso_compresso import (
+    activity_from_output,
     deletion_choice_for_scope,
     parse_terminal_result,
     removal_result_message,
     result_space_from_summary,
+    technical_log_path_from_output,
 )
 from espresso_compresso_cli import (
     BatchLogger,
@@ -22,6 +24,7 @@ from espresso_compresso_cli import (
     Toolchain,
     VideoTask,
     build_tasks,
+    child_process_options,
     decode_integrity,
     discard_larger_temporary,
     delete_source_safely,
@@ -43,6 +46,52 @@ def media(*, fps: float = 30.0, duration: float = 60.0) -> MediaInfo:
 
 
 class CompressorSafetyTests(unittest.TestCase):
+    def test_child_process_options_hide_windows_tools_and_keep_groups(self) -> None:
+        ordinary = child_process_options("nt")
+        grouped = child_process_options("nt", grouped=True)
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        self.assertEqual(ordinary, {"creationflags": no_window})
+        self.assertEqual(grouped, {"creationflags": no_window | new_group})
+
+    def test_child_process_options_keep_posix_inspection_ordinary(self) -> None:
+        self.assertEqual(child_process_options("posix"), {})
+        self.assertEqual(child_process_options("posix", grouped=True), {"start_new_session": True})
+
+    def test_activity_filters_technical_output_and_keeps_meaningful_events(self) -> None:
+        self.assertEqual(activity_from_output("[2/3] Holiday clip.mp4"), "File 2 of 3: Holiday clip.mp4")
+        self.assertEqual(
+            activity_from_output("VALIDATED: 1.0 GB (45.2% smaller)."),
+            "Validated: 1.0 GB (45.2% smaller).",
+        )
+        self.assertEqual(
+            activity_from_output("Tracks preserved: video 1, audio 2, subtitles 1."),
+            "Tracks preserved: video 1, audio 2, subtitles 1.",
+        )
+        self.assertEqual(
+            activity_from_output("  ORIGINAL KEPT: source changed during encoding"),
+            "Original kept by safety checks.",
+        )
+        self.assertEqual(
+            activity_from_output("FAILED: Could not start HandBrakeCLI: C:\\private\\tool.exe"),
+            "A file needs attention. Open the technical log for details.",
+        )
+        self.assertIsNone(activity_from_output("HandBrakeCLI --input C:\\private\\clip.mp4 --verbose"))
+
+    def test_activity_final_counts_and_technical_log_path_are_display_free(self) -> None:
+        result_line = "RESULT_JSON: " + cli.json.dumps({
+            "encoded": 2, "existing_verified": 1, "no_benefit": 1, "failed": 0,
+        })
+        self.assertEqual(
+            activity_from_output(result_line),
+            "Finished: 2 compressed • 1 already complete • 1 no-size-benefit • 0 need attention",
+        )
+        self.assertEqual(
+            technical_log_path_from_output("  Log: C:\\Logs\\compression_log_20260815_132017.txt"),
+            Path("C:\\Logs\\compression_log_20260815_132017.txt"),
+        )
+        self.assertIsNone(technical_log_path_from_output("Logging to: C:\\Logs\\fallback.txt"))
+
     def test_destinations_are_stable_and_collision_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "input"

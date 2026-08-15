@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from espresso_compresso_cli import (
     MODES,
+    child_process_options,
     discover_videos,
     format_size,
     inspect_toolchain,
@@ -65,6 +66,56 @@ def parse_terminal_result(line: str) -> dict[str, object] | None:
     except (json.JSONDecodeError, IndexError):
         return None
     return result if isinstance(result, dict) else None
+
+
+def technical_log_path_from_output(line: str) -> Path | None:
+    """Read the CLI's final log location without exposing it in the activity view."""
+    value = line.strip()
+    if not value.startswith("Log:"):
+        return None
+    path_text = value.split(":", 1)[1].strip()
+    return Path(path_text) if path_text else None
+
+
+def activity_from_output(line: str) -> str | None:
+    """Turn stable CLI milestones into short, non-technical activity updates."""
+    value = line.strip()
+    result = parse_terminal_result(value)
+    if result is not None:
+        encoded = int(result.get("encoded", 0))
+        existing = int(result.get("existing_verified", 0))
+        skipped = int(result.get("no_benefit", 0))
+        failed = int(result.get("failed", 0))
+        return (
+            f"Finished: {encoded} compressed • {existing} already complete • "
+            f"{skipped} no-size-benefit • {failed} need attention"
+        )
+    file_match = re.match(r"\[(\d+)/(\d+)\]\s+(.+)", value)
+    if file_match:
+        return f"File {file_match.group(1)} of {file_match.group(2)}: {Path(file_match.group(3)).name}"
+    if value.startswith("VALIDATED:"):
+        return "Validated: " + value.split(":", 1)[1].strip()
+    if value.startswith("VERIFIED EXISTING:"):
+        return "Existing compressed copy verified."
+    if value.startswith("SKIPPED:"):
+        return "Skipped: already efficiently compressed."
+    if value.startswith("NO SIZE BENEFIT:"):
+        return "No size benefit; the original was kept."
+    if value.startswith("Tracks preserved:"):
+        return "Tracks preserved: " + value.split(":", 1)[1].strip()
+    if value.startswith("ORIGINAL KEPT:") or value == "Original kept.":
+        return "Original kept by safety checks."
+    if value.startswith("Original permanently deleted"):
+        return "Original deleted after every safety check passed."
+    if value.startswith("Stopped by user"):
+        return "Stopped. Completed outputs remain available."
+    if (
+        "FAILED" in value
+        or "NEEDS ATTENTION" in value
+        or value.startswith("VALIDATION FAILED")
+    ):
+        return "A file needs attention. Open the technical log for details."
+    return None
 
 
 def deletion_choice_for_scope(scope: str, requested: str) -> str:
@@ -137,8 +188,9 @@ class CompressorApp:
         self.file_finished = False
         self.output_path: Path | None = None
         self.advanced_visible = False
-        self.details_visible = False
-        self.detail_line_count = 0
+        self.activity_visible = False
+        self.activity_line_count = 0
+        self.technical_log_path: Path | None = None
         self.empty_folder = False
         self.receipt = {"compressed": 0, "complete": 0, "skipped": 0, "attention": 0}
         self.reader_error: str | None = None
@@ -286,7 +338,7 @@ class CompressorApp:
         self._build_advanced_card(content)
         self._build_action_bar(content)
         self._build_progress_card(content)
-        self._build_details_panel(content)
+        self._build_activity_panel(content)
 
     def _update_main_scroll_region(self, _event: tk.Event) -> None:
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
@@ -300,7 +352,7 @@ class CompressorApp:
 
     def _mouse_wheel(self, event: tk.Event) -> str | None:
         widget = self.root.winfo_containing(event.x_root, event.y_root)
-        if widget is None or str(widget).startswith(str(self.details_frame)):
+        if widget is None or str(widget).startswith(str(self.activity_frame)):
             return None
         if str(widget).startswith(str(self.main_canvas)):
             delta = -1 if event.delta > 0 else 1
@@ -453,10 +505,10 @@ class CompressorApp:
         card = self._card(parent)
         card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self._section_title(card, "2", "Compression mode")
-        modes = tk.Frame(card, bg=Palette.SURFACE)
-        modes.pack(fill="x")
+        self.mode_row = tk.Frame(card, bg=Palette.SURFACE)
+        self.mode_row.pack(fill="x")
         for column in range(3):
-            modes.grid_columnconfigure(column, weight=1, uniform="mode")
+            self.mode_row.grid_columnconfigure(column, weight=1, uniform="mode")
 
         choices = (
             ("fast", "FAST", "Uses your RTX GPU\nBest for large batches"),
@@ -466,7 +518,7 @@ class CompressorApp:
         self.mode_buttons: list[tk.Radiobutton] = []
         for column, (value, heading, description) in enumerate(choices):
             button = tk.Radiobutton(
-                modes,
+                self.mode_row,
                 text=f"{heading}\n{description}",
                 variable=self.mode_var,
                 value=value,
@@ -528,7 +580,7 @@ class CompressorApp:
         self.scope_controls: list[ttk.Radiobutton] = []
         test_scope = ttk.Radiobutton(
             self.scope_row,
-            text="Test the first 3 files",
+            text="Test first 3 files (originals always kept)",
             variable=self.scope_var,
             value="test",
             style="Warm.TRadiobutton",
@@ -649,6 +701,11 @@ class CompressorApp:
         )
         self.open_button.configure(state="disabled", bg=Palette.MUTED)
         self.open_button.pack(side="right", ipady=4)
+        self.open_log_button = self._button(
+            bar, "OPEN TECHNICAL LOG", self._open_technical_log, Palette.BLUE, font_size=10,
+        )
+        self.open_log_button.configure(state="disabled", bg=Palette.MUTED)
+        self.open_log_button.pack(side="right", padx=(0, 8), ipady=4)
 
     def _build_progress_card(self, parent: tk.Widget) -> None:
         card = self._card(parent)
@@ -746,11 +803,11 @@ class CompressorApp:
         )
         self.result_space_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
-    def _build_details_panel(self, parent: tk.Widget) -> None:
-        self.details_toggle = tk.Button(
+    def _build_activity_panel(self, parent: tk.Widget) -> None:
+        self.activity_toggle = tk.Button(
             parent,
-            text="SHOW DETAILS  +",
-            command=self._toggle_details,
+            text="SHOW ACTIVITY  +",
+            command=self._toggle_activity,
             bg=Palette.BACKGROUND,
             fg=Palette.MUTED,
             activebackground=Palette.BACKGROUND,
@@ -763,33 +820,33 @@ class CompressorApp:
             font=("Segoe UI Semibold", 11),
             cursor="hand2",
         )
-        self.details_toggle.grid(row=7, column=0, sticky="w", pady=(6, 0))
-        self.details_frame = tk.Frame(
+        self.activity_toggle.grid(row=7, column=0, sticky="w", pady=(6, 0))
+        self.activity_frame = tk.Frame(
             parent,
-            bg=Palette.INK,
+            bg=Palette.SURFACE_ALT,
             highlightbackground=Palette.BORDER,
             highlightthickness=1,
         )
-        self.details_text = tk.Text(
-            self.details_frame,
+        self.activity_text = tk.Text(
+            self.activity_frame,
             height=8,
-            bg=Palette.INK,
-            fg="#E9E1D4",
-            insertbackground=Palette.WHITE,
+            bg=Palette.SURFACE,
+            fg=Palette.INK,
+            insertbackground=Palette.INK,
             relief="flat",
-            font=("Consolas", 11),
+            font=("Segoe UI", 10),
             wrap="word",
             padx=10,
             pady=8,
             state="disabled",
         )
         scrollbar = ttk.Scrollbar(
-            self.details_frame,
+            self.activity_frame,
             orient="vertical",
-            command=self.details_text.yview,
+            command=self.activity_text.yview,
         )
-        self.details_text.configure(yscrollcommand=scrollbar.set)
-        self.details_text.pack(side="left", fill="both", expand=True)
+        self.activity_text.configure(yscrollcommand=scrollbar.set)
+        self.activity_text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
     def _button(
@@ -830,14 +887,14 @@ class CompressorApp:
             self.advanced_toggle.configure(text="MORE OPTIONS  +")
         self._fit_to_screen()
 
-    def _toggle_details(self) -> None:
-        self.details_visible = not self.details_visible
-        if self.details_visible:
-            self.details_frame.grid(row=8, column=0, sticky="nsew", pady=(5, 0))
-            self.details_toggle.configure(text="HIDE DETAILS  -")
+    def _toggle_activity(self) -> None:
+        self.activity_visible = not self.activity_visible
+        if self.activity_visible:
+            self.activity_frame.grid(row=8, column=0, sticky="nsew", pady=(5, 0))
+            self.activity_toggle.configure(text="HIDE ACTIVITY  -")
         else:
-            self.details_frame.grid_remove()
-            self.details_toggle.configure(text="SHOW DETAILS  +")
+            self.activity_frame.grid_remove()
+            self.activity_toggle.configure(text="SHOW ACTIVITY  +")
         self._fit_to_screen()
 
     def _browse_folder(self) -> None:
@@ -858,11 +915,13 @@ class CompressorApp:
         if self.scope_var.get() == "test":
             self.originals_var.set("keep")
             self.delete_originals_radio.state(["disabled"])
-            self.deletion_note_var.set("Test runs never delete originals.")
+            self.deletion_note_var.set(
+                "A 3-file test never deletes originals. Choose Process the entire folder to enable deletion."
+            )
         else:
             self.delete_originals_radio.state(["!disabled"])
             self.deletion_note_var.set(
-                "Deletion is irreversible. Choose it explicitly for the full-folder job."
+                "Deletion is available only for full-folder jobs and requires confirmation plus all safety checks."
             )
         self._schedule_preflight()
 
@@ -1041,13 +1100,7 @@ class CompressorApp:
         self.queue_summary_var.set(
             f"{len(videos)} files • {format_size(source_bytes)} source • output: {output_path}"
         )
-        self._append_detail(
-            f"Starting: {len(videos)} files, {format_size(source_bytes)} source\nOutput: {output_path}\n"
-        )
-
-        creation_flags = 0
-        if os.name == "nt":
-            creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        self._append_activity(f"Starting: {len(videos)} files • {format_size(source_bytes)} source\n")
         try:
             self.process = subprocess.Popen(
                 command,
@@ -1059,8 +1112,7 @@ class CompressorApp:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                creationflags=creation_flags,
-                start_new_session=os.name != "nt",
+                **child_process_options(os.name, grouped=True),
             )
             if delete_originals and self.process.stdin:
                 self.process.stdin.write("DELETE\n")
@@ -1129,7 +1181,7 @@ class CompressorApp:
                     self._job_finished(int(payload))
                 elif kind == "reader_error":
                     self.reader_error = str(payload)
-                    self._append_detail(f"Output reader error: {payload}\n")
+                    self._append_activity("Output reader stopped. A file needs attention.\n")
                     self._set_status("Needs attention", Palette.RED)
                     self.current_file_var.set("The output reader stopped. Waiting for the process to end.")
         except queue.Empty:
@@ -1137,7 +1189,15 @@ class CompressorApp:
         self.root.after(80, self._poll_messages)
 
     def _handle_output_line(self, line: str) -> None:
-        self._append_detail(line + "\n")
+        log_path = technical_log_path_from_output(line)
+        if log_path is not None:
+            self.technical_log_path = log_path
+            if log_path.is_file():
+                self.open_log_button.configure(state="normal", bg=Palette.BLUE)
+
+        activity = activity_from_output(line)
+        if activity:
+            self._append_activity(activity + "\n")
 
         result = parse_terminal_result(line)
         if result is not None:
@@ -1253,10 +1313,10 @@ class CompressorApp:
         if self.reader_error:
             self._set_status("Needs attention", Palette.RED)
             self.current_file_var.set("Compression stopped because the output reader failed.")
-            self.file_text_var.set("Review details")
+            self.file_text_var.set("Review activity")
             self._update_queue_summary()
-            if not self.details_visible:
-                self._toggle_details()
+            if not self.activity_visible:
+                self._toggle_activity()
         elif was_stopping:
             self._set_status("Stopped", Palette.MUTED)
             self.current_file_var.set("Job stopped. Completed outputs remain available.")
@@ -1277,18 +1337,18 @@ class CompressorApp:
         else:
             self._set_status("Needs attention", Palette.RED)
             self.current_file_var.set("The job finished with an issue. Your originals are safe unless noted.")
-            self.file_text_var.set("Review details")
+            self.file_text_var.set("Review activity")
             self._update_queue_summary()
-            if not self.details_visible:
-                self._toggle_details()
+            if not self.activity_visible:
+                self._toggle_activity()
         if self.delete_requested_for_job:
             title, message, needs_attention = removal_result_message(self.terminal_result)
             if needs_attention:
                 self._set_status("Needs attention", Palette.RED)
-                self.current_file_var.set("Original removal needs attention. Review Details.")
-                self.file_text_var.set("Review details")
-                if not self.details_visible:
-                    self._toggle_details()
+                self.current_file_var.set("Original removal needs attention. Review Activity.")
+                self.file_text_var.set("Review activity")
+                if not self.activity_visible:
+                    self._toggle_activity()
             messagebox.showinfo(title, message, parent=self.root)
         self.delete_requested_for_job = False
         self._select_keep_originals()
@@ -1326,8 +1386,8 @@ class CompressorApp:
                     ["taskkill", "/PID", str(process_id), "/T", "/F"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
                     check=False,
+                    **child_process_options(os.name),
                 )
             elif self.process:
                 os.killpg(process_id, signal.SIGTERM)
@@ -1386,20 +1446,22 @@ class CompressorApp:
         self.result_count_var.set("0 compressed")
         self.result_space_var.set("Calculating compression result")
         self.open_button.configure(state="disabled", bg=Palette.MUTED)
-        self.details_text.configure(state="normal")
-        self.details_text.delete("1.0", "end")
-        self.details_text.configure(state="disabled")
-        self.detail_line_count = 0
+        self.technical_log_path = None
+        self.open_log_button.configure(state="disabled", bg=Palette.MUTED)
+        self.activity_text.configure(state="normal")
+        self.activity_text.delete("1.0", "end")
+        self.activity_text.configure(state="disabled")
+        self.activity_line_count = 0
 
-    def _append_detail(self, text: str) -> None:
-        self.details_text.configure(state="normal")
-        self.details_text.insert("end", text)
-        self.detail_line_count += text.count("\n")
-        if self.detail_line_count > 1200:
-            self.details_text.delete("1.0", "201.0")
-            self.detail_line_count -= 200
-        self.details_text.see("end")
-        self.details_text.configure(state="disabled")
+    def _append_activity(self, text: str) -> None:
+        self.activity_text.configure(state="normal")
+        self.activity_text.insert("end", text)
+        self.activity_line_count += text.count("\n")
+        if self.activity_line_count > 240:
+            self.activity_text.delete("1.0", "41.0")
+            self.activity_line_count -= 40
+        self.activity_text.see("end")
+        self.activity_text.configure(state="disabled")
 
     def _show_receipt(self) -> None:
         self.result_count_var.set(
@@ -1417,6 +1479,17 @@ class CompressorApp:
         self.result_count_label.configure(wraplength=wraplength)
         self.result_space_label.configure(wraplength=wraplength)
         if event.width < 700:
+            self.mode_row.grid_columnconfigure(0, weight=1, uniform="mode")
+            self.mode_row.grid_columnconfigure(1, weight=0, uniform="")
+            self.mode_row.grid_columnconfigure(2, weight=0, uniform="")
+            for row, button in enumerate(self.mode_buttons):
+                button.grid_configure(row=row, column=0, sticky="ew", padx=0, pady=(0, 6))
+        else:
+            for column in range(3):
+                self.mode_row.grid_columnconfigure(column, weight=1, uniform="mode")
+            for column, button in enumerate(self.mode_buttons):
+                button.grid_configure(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 6, 0), pady=0)
+        if event.width < 700:
             self.scope_controls[0].grid_configure(row=0, column=0, sticky="w", padx=0, pady=(0, 4))
             self.scope_controls[1].grid_configure(row=1, column=0, sticky="w", padx=0, pady=(0, 4))
             self.fps_check.grid_configure(row=2, column=0, sticky="w", padx=0)
@@ -1424,22 +1497,31 @@ class CompressorApp:
             self.scope_controls[0].grid_configure(row=0, column=0, sticky="w", padx=(0, 14), pady=0)
             self.scope_controls[1].grid_configure(row=0, column=1, sticky="w", padx=(0, 14), pady=0)
             self.fps_check.grid_configure(row=0, column=2, sticky="e", padx=0, pady=0)
-        if self.details_visible:
-            self.details_text.configure(height=5 if event.height < 720 else 8)
+        if self.activity_visible:
+            self.activity_text.configure(height=5 if event.height < 720 else 8)
 
     def _open_output(self) -> None:
         if not self.output_path or not self.output_path.is_dir():
             messagebox.showinfo("No results yet", "The output folder does not exist yet.", parent=self.root)
             return
+        self._open_path(self.output_path, "Could not open folder")
+
+    def _open_technical_log(self) -> None:
+        if not self.technical_log_path or not self.technical_log_path.is_file():
+            messagebox.showinfo("No technical log yet", "The technical log is not available yet.", parent=self.root)
+            return
+        self._open_path(self.technical_log_path, "Could not open technical log")
+
+    def _open_path(self, path: Path, error_title: str) -> None:
         try:
             if os.name == "nt":
-                os.startfile(str(self.output_path))  # type: ignore[attr-defined]
+                os.startfile(str(path))  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(self.output_path)])
+                subprocess.Popen(["open", str(path)])
             else:
-                subprocess.Popen(["xdg-open", str(self.output_path)])
+                subprocess.Popen(["xdg-open", str(path)])
         except OSError as error:
-            messagebox.showerror("Could not open folder", str(error), parent=self.root)
+            messagebox.showerror(error_title, str(error), parent=self.root)
 
     def _close_window(self) -> None:
         if self.process is not None:
