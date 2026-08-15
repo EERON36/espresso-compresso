@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+compression_log_*.txt
+*.partial.*
+_compressed/
+.qa_*/
+
+# Keep large third-party executables out of normal Git history. They can be
+# added to a portable release later with their version, checksum, and notices.
+tools/HandBrakeCLI.exe
