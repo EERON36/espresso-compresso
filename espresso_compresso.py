@@ -89,7 +89,7 @@ def activity_from_output(line: str) -> str | None:
         smaller_label = "original already smaller" if skipped == 1 else "originals already smaller"
         return (
             f"Finished: {encoded} compressed • {existing} already complete • "
-            f"{skipped} {smaller_label} • {failed} need attention"
+            f"{skipped} {smaller_label} • {failed} needing attention"
         )
     file_match = re.match(r"\[(\d+)/(\d+)\]\s+(.+)", value)
     if file_match:

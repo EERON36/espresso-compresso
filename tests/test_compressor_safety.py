@@ -95,7 +95,7 @@ class CompressorSafetyTests(unittest.TestCase):
         })
         self.assertEqual(
             activity_from_output(result_line),
-            "Finished: 2 compressed • 1 already complete • 1 original already smaller • 0 need attention",
+            "Finished: 2 compressed • 1 already complete • 1 original already smaller • 0 needing attention",
         )
         plural_result_line = "RESULT_JSON: " + cli.json.dumps({
             "encoded": 0, "existing_verified": 0, "no_benefit": 2, "failed": 0,
