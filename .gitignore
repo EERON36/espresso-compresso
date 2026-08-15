@@ -7,6 +7,11 @@ compression_log_*.txt
 *.partial.*
 _compressed/
 .qa_*/
+.release-build-venv/
+release/
+release-cache/
+vendor/
+packaging/*.ico
 
 # Keep large third-party executables out of normal Git history. They can be
 # added to a portable release later with their version, checksum, and notices.

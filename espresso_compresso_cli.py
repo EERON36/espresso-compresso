@@ -31,6 +31,37 @@ EFFICIENT_CODECS = {"av1", "hevc", "h265", "vp9"}
 SUPPORTED_FPS = {5, 10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60}
 
 
+def tool_resource_directory(script_file: Path | str | None = None) -> Path:
+    """Locate bundled ``tools`` from the module path PyInstaller provides at runtime."""
+    return Path(script_file if script_file is not None else __file__).resolve().parent
+
+
+def user_log_directory(
+    platform: str | None = None,
+    environ: dict[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Return a writable per-user log directory, never a bundled resource path."""
+    platform = platform or sys.platform
+    environ = os.environ if environ is None else environ
+    home = Path.home() if home is None else home
+    if platform == "win32":
+        base = Path(environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        return base / "Espresso Compresso" / "logs"
+    if platform == "darwin":
+        return home / "Library" / "Logs" / "Espresso Compresso"
+    base = Path(environ.get("XDG_STATE_HOME", home / ".local" / "state"))
+    return base / "espresso-compresso" / "logs"
+
+
+def fallback_log_path(
+    timestamp: str, platform: str | None = None,
+    environ: dict[str, str] | None = None, home: Path | None = None,
+) -> Path:
+    """Build a testable fallback path for a compression log."""
+    return user_log_directory(platform, environ, home) / f"compression_log_{timestamp}.txt"
+
+
 def child_process_options(platform: str, *, grouped: bool = False) -> dict[str, int | bool]:
     """Return platform-safe options for a child process without starting one."""
     if platform == "nt":
@@ -219,7 +250,7 @@ def find_executable(
 
 
 def find_handbrake(explicit: Path | None) -> Path | None:
-    script_dir = Path(__file__).resolve().parent
+    script_dir = tool_resource_directory()
     candidates = [script_dir / "tools" / "HandBrakeCLI.exe", script_dir / "tools" / "HandBrakeCLI"]
     configured = os.environ.get("HANDBRAKECLI")
     if configured:
@@ -237,7 +268,7 @@ def find_handbrake(explicit: Path | None) -> Path | None:
 
 
 def find_ffprobe(explicit: Path | None) -> Path | None:
-    script_dir = Path(__file__).resolve().parent
+    script_dir = tool_resource_directory()
     candidates = [script_dir / "tools" / "ffprobe.exe", script_dir / "tools" / "ffprobe"]
     configured = os.environ.get("FFPROBE")
     if configured:
@@ -246,7 +277,7 @@ def find_ffprobe(explicit: Path | None) -> Path | None:
 
 
 def find_ffmpeg(explicit: Path | None) -> Path | None:
-    script_dir = Path(__file__).resolve().parent
+    script_dir = tool_resource_directory()
     candidates = [script_dir / "tools" / "ffmpeg.exe", script_dir / "tools" / "ffmpeg"]
     configured = os.environ.get("FFMPEG")
     if configured:
@@ -553,6 +584,7 @@ class BatchLogger:
         except OSError as preferred_error:
             self.path = fallback_path
             try:
+                fallback_path.parent.mkdir(parents=True, exist_ok=True)
                 self._handle = fallback_path.open("a", encoding="utf-8")
                 print(f"WARNING: Output-folder logging failed ({preferred_error}).")
                 print(f"Logging to: {fallback_path}\n")
@@ -943,7 +975,7 @@ def main() -> int:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             logger = BatchLogger(
                 output_root / f"compression_log_{timestamp}.txt",
-                Path(__file__).resolve().parent / f"compression_log_{timestamp}.txt",
+                fallback_log_path(timestamp),
             )
             logger.write([
                 f"Started: {datetime.now().isoformat(timespec='seconds')}",

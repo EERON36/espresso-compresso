@@ -1,0 +1,14 @@
+ESPRESSO COMPRESSO FOR WINDOWS
+
+1. Extract this ZIP first: right-click it and choose Extract All.
+2. Open the extracted Espresso Compresso folder.
+3. Double-click Espresso Compresso.
+4. Choose a recordings folder, keep Smaller selected, and start with the 3-file test.
+
+Your originals stay by default. Compressed copies go in _compressed.
+
+Fast needs a compatible NVIDIA RTX/NVENC setup. If it is unavailable or fails,
+choose Smaller.
+
+Windows may show a SmartScreen message for a new download. Only continue when
+you got this ZIP from the trusted Espresso Compresso release page.

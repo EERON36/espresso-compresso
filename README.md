@@ -1,51 +1,43 @@
 # Espresso Compresso
 
 Espresso Compresso is a small, local app for compressing a folder of recordings.
-It processes one file at a time so the computer stays usable. It is deliberately
-not a media library, editor, or cloud service.
+It processes one file at a time so the computer stays usable.
 
-## Use it
+## Windows download
 
-Windows: double-click `Start Espresso Compresso.bat`, or drag a folder onto it.
+[Download Espresso Compresso for Windows x64](https://github.com/EERON36/espresso-compresso/releases/latest/download/Espresso-Compresso-Windows-x64.zip)
 
-Linux: run `sh start-espresso-compresso.sh /path/to/recordings` (Tk and Python 3
-must be installed).
+The repository must be accessible to you if the release is private.
 
-Choose one of three modes:
+1. Download the ZIP and use **Extract All**.
+2. Open the extracted folder and double-click **Espresso Compresso**.
+3. Choose a recordings folder, keep **Smaller** selected, and begin with the three-file test.
 
-- **Smaller** — reliable CPU H.265; used by default when Fast is unavailable.
-- **Fast** — RTX/NVENC H.265; selected by default only when the installed
-  HandBrakeCLI supports it.
-- **Editing** — constant-frame-rate H.264 MP4 for editors.
+Originals are kept by default. Results go to `_compressed` unless you choose a
+different output folder. Windows may show a SmartScreen message for a new
+download; continue only when you trust the official release page.
 
-Start with the three-file test. Results go to `_compressed` unless another output
-folder is selected.
+**Fast** requires compatible NVIDIA RTX/NVENC hardware and drivers. If it is
+unavailable or fails, choose **Smaller**, the reliable fallback.
 
 ## Safety
 
-- Originals are kept by default.
 - A completed output is written to a unique temporary name, validated, then moved
   into place. Interrupted temporary files are retained for inspection.
-- Restarting recognizes a valid existing output, but **never deletes an original
-  because of it**.
+- Restarting recognizes a valid existing output, but never deletes an original
+  because of it.
 - Deletion requires a newly encoded, smaller output in the current run, strict
   media validation, a source recheck, and a successful full video/audio decode by
   `ffmpeg`. Without `ffmpeg`, originals remain untouched.
 - Stopping asks the active encode to end gracefully before using a forced stop.
 
-Ordinary output names stay readable. A short stable source-path tag is added only
-when two inputs would otherwise produce the same output name.
+## Source and Linux
 
-## Requirements
+The Windows ZIP includes its own runtime and media tools. Running from source
+still requires Python 3.10+ with Tk and compatible local tools.
 
-Python 3.10+ with Tk is required when running from source. The app itself has no
-third-party Python packages.
-
-HandBrakeCLI is required. `ffprobe` improves inspection speed and `ffmpeg` is
-required only when permanently deleting originals. Put the tools on `PATH`, choose
-them with the command-line options, or place the Windows HandBrakeCLI in `tools`.
-The local development folder may contain that executable, but the large binary is
-kept out of normal Git history. Check `THIRD_PARTY_NOTICES.md` before sharing it.
+Windows source: double-click `Start Espresso Compresso.bat`, or drag a folder
+onto it. Linux: run `sh start-espresso-compresso.sh /path/to/recordings`.
 
 The command line remains available:
 
@@ -56,8 +48,6 @@ python .\espresso_compresso_cli.py "D:\Recordings" --mode quality --limit 3
 Use `python .\espresso_compresso_cli.py --help` for all options.
 
 ## Development
-
-Run the isolated tests with:
 
 ```powershell
 python -m unittest discover -s tests -v

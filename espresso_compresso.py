@@ -26,8 +26,63 @@ from espresso_compresso_cli import (
 )
 
 
-APP_DIR = Path(__file__).resolve().parent
-COMPRESSOR = APP_DIR / "espresso_compresso_cli.py"
+APP_VERSION = "1.0.0"
+WORKER_FILENAME = "Espresso Compresso Worker.exe"
+
+
+def is_frozen_runtime(*, frozen: bool | None = None) -> bool:
+    """Return whether the app is running from a PyInstaller executable."""
+    return getattr(sys, "frozen", False) if frozen is None else frozen
+
+
+def resource_directory(script_file: Path | str | None = None) -> Path:
+    """Locate read-only bundled resources from the module's ``__file__`` path."""
+    return Path(script_file if script_file is not None else __file__).resolve().parent
+
+
+def launch_directory(
+    resource_dir: Path, executable: Path | str, *, frozen: bool,
+) -> Path:
+    """Return the user-visible app folder when frozen, otherwise the source folder."""
+    return Path(executable).resolve().parent if frozen else resource_dir
+
+
+def worker_location(
+    resource_dir: Path, executable: Path | str, *, frozen: bool,
+) -> Path:
+    """Return the CLI script in source mode or the nested worker executable when frozen."""
+    if frozen:
+        return launch_directory(resource_dir, executable, frozen=True) / "_internal" / "worker" / WORKER_FILENAME
+    return resource_dir / "espresso_compresso_cli.py"
+
+
+def worker_command(
+    resource_dir: Path, executable: Path | str, *, frozen: bool,
+) -> list[str]:
+    """Build the command that preserves a separate, stoppable CLI worker."""
+    worker = worker_location(resource_dir, executable, frozen=frozen)
+    return [str(worker)] if frozen else [str(executable), "-u", str(worker)]
+
+
+def explicit_tool_arguments(
+    handbrake: Path | None, ffprobe: Path | None, ffmpeg: Path | None,
+) -> list[str]:
+    """Pin a worker to the same discovered tools used by the GUI preflight."""
+    arguments: list[str] = []
+    for flag, tool in (("--handbrake", handbrake), ("--ffprobe", ffprobe), ("--ffmpeg", ffmpeg)):
+        if tool is not None:
+            arguments.extend([flag, str(tool)])
+    return arguments
+
+
+def default_mode_key() -> str:
+    """Keep the non-GPU mode the safe first choice for every recipient."""
+    return "quality"
+
+
+APP_DIR = resource_directory()
+FROZEN_RUNTIME = is_frozen_runtime()
+LAUNCH_DIR = launch_directory(APP_DIR, sys.executable, frozen=FROZEN_RUNTIME)
 
 
 class Palette:
@@ -212,7 +267,7 @@ class CompressorApp:
         self.delete_requested_for_job = False
 
         self.folder_var = tk.StringVar()
-        self.mode_var = tk.StringVar(value="quality")
+        self.mode_var = tk.StringVar(value=default_mode_key())
         self.scope_var = tk.StringVar(value="test")
         self.fps_cap_var = tk.BooleanVar(value=True)
         self.originals_var = tk.StringVar(value="keep")
@@ -228,8 +283,6 @@ class CompressorApp:
 
         self.toolchain = inspect_toolchain()
         self.fast_available = not preflight_mode(self.toolchain, MODES["fast"])
-        if self.fast_available:
-            self.mode_var.set("fast")
         self._preflight_after: str | None = None
 
         self._configure_window()
@@ -525,7 +578,7 @@ class CompressorApp:
             self.mode_row.grid_columnconfigure(column, weight=1, uniform="mode")
 
         choices = (
-            ("fast", "FAST", "Uses your RTX GPU\nBest for large batches"),
+            ("fast", "FAST", "Needs compatible NVIDIA RTX/NVENC\nSmaller is the reliable fallback"),
             ("quality", "SMALLER", "Uses your CPU\nBest compression"),
             ("editing", "EDITING", "Creates H.264 MP4\nLarger, editor-friendly"),
         )
@@ -559,15 +612,19 @@ class CompressorApp:
             if value == "fast" and not self.fast_available:
                 button.configure(state="disabled", cursor="arrow")
             self.mode_buttons.append(button)
-        if not self.fast_available:
-            tk.Label(
-                card,
-                text="Fast needs an RTX/NVENC-enabled HandBrakeCLI. Smaller is selected instead.",
-                bg=Palette.SURFACE,
-                fg=Palette.MUTED,
-                font=("Segoe UI", 10),
-                anchor="w",
-            ).pack(fill="x", pady=(7, 0))
+        fast_note = (
+            "Fast is unavailable with this HandBrakeCLI. Smaller is selected."
+            if not self.fast_available
+            else "Fast requires a compatible NVIDIA RTX/NVENC setup. Smaller is the reliable fallback."
+        )
+        tk.Label(
+            card,
+            text=fast_note,
+            bg=Palette.SURFACE,
+            fg=Palette.MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill="x", pady=(7, 0))
         self._refresh_mode_buttons()
 
     def _refresh_mode_buttons(self) -> None:
@@ -1051,10 +1108,11 @@ class CompressorApp:
             )
             self._select_keep_originals()
             return
-        if not COMPRESSOR.is_file():
+        worker = worker_location(APP_DIR, sys.executable, frozen=FROZEN_RUNTIME)
+        if not worker.is_file():
             messagebox.showerror(
                 "Compressor missing",
-                f"The compression engine could not be found:\n{COMPRESSOR}",
+                f"The compression engine could not be found:\n{worker}",
                 parent=self.root,
             )
             self._select_keep_originals()
@@ -1118,13 +1176,14 @@ class CompressorApp:
                 return
 
         command = [
-            sys.executable,
-            "-u",
-            str(COMPRESSOR),
+            *worker_command(APP_DIR, sys.executable, frozen=FROZEN_RUNTIME),
             str(folder.resolve()),
             "--mode",
             self.mode_var.get(),
         ]
+        command.extend(explicit_tool_arguments(
+            self.toolchain.handbrake, self.toolchain.ffprobe, self.toolchain.ffmpeg,
+        ))
         if self.scope_var.get() == "test":
             command.extend(["--limit", "3"])
         if not self.fps_cap_var.get():
@@ -1147,7 +1206,7 @@ class CompressorApp:
         try:
             self.process = subprocess.Popen(
                 command,
-                cwd=str(APP_DIR),
+                cwd=str(LAUNCH_DIR),
                 stdin=subprocess.PIPE if delete_originals else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

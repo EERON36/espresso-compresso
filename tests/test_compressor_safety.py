@@ -11,11 +11,17 @@ import espresso_compresso_cli as cli
 from espresso_compresso import (
     action_bar_grid_positions,
     activity_from_output,
+    default_mode_key,
     deletion_choice_for_scope,
+    explicit_tool_arguments,
+    launch_directory,
     parse_terminal_result,
+    resource_directory,
     removal_result_message,
     result_space_from_summary,
     technical_log_path_from_output,
+    worker_command,
+    worker_location,
 )
 from espresso_compresso_cli import (
     BatchLogger,
@@ -31,6 +37,7 @@ from espresso_compresso_cli import (
     delete_source_safely,
     discover_videos,
     emit_terminal_result,
+    fallback_log_path,
     find_ffmpeg,
     fps_arguments,
     maybe_delete_original,
@@ -38,6 +45,8 @@ from espresso_compresso_cli import (
     output_location_error,
     preflight_mode,
     terminal_result,
+    tool_resource_directory,
+    user_log_directory,
     validate_output,
 )
 
@@ -68,6 +77,52 @@ class CompressorSafetyTests(unittest.TestCase):
     def test_child_process_options_keep_posix_inspection_ordinary(self) -> None:
         self.assertEqual(child_process_options("posix"), {})
         self.assertEqual(child_process_options("posix", grouped=True), {"start_new_session": True})
+
+    def test_runtime_helpers_keep_source_and_frozen_workers_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resource = root / "resources"
+            executable = root / "Espresso Compresso.exe"
+            self.assertEqual(resource_directory(resource / "espresso_compresso.py"), resource.resolve())
+            self.assertEqual(tool_resource_directory(resource / "espresso_compresso_cli.py"), resource.resolve())
+            self.assertEqual(launch_directory(resource, executable, frozen=False), resource)
+            self.assertEqual(launch_directory(resource, executable, frozen=True), root)
+            self.assertEqual(
+                worker_location(resource, executable, frozen=False),
+                resource / "espresso_compresso_cli.py",
+            )
+            frozen_worker = root / "_internal" / "worker" / "Espresso Compresso Worker.exe"
+            self.assertEqual(worker_location(resource, executable, frozen=True), frozen_worker)
+            self.assertEqual(
+                worker_command(resource, executable, frozen=False),
+                [str(executable), "-u", str(resource / "espresso_compresso_cli.py")],
+            )
+            self.assertEqual(worker_command(resource, executable, frozen=True), [str(frozen_worker)])
+
+    def test_gui_worker_arguments_pin_discovered_tools_and_smaller_is_default(self) -> None:
+        self.assertEqual(default_mode_key(), "quality")
+        self.assertEqual(
+            explicit_tool_arguments(Path("HandBrakeCLI.exe"), Path("ffprobe.exe"), Path("ffmpeg.exe")),
+            [
+                "--handbrake", "HandBrakeCLI.exe", "--ffprobe", "ffprobe.exe",
+                "--ffmpeg", "ffmpeg.exe",
+            ],
+        )
+        self.assertEqual(explicit_tool_arguments(None, None, None), [])
+
+    def test_fallback_logs_use_user_data_directories(self) -> None:
+        self.assertEqual(
+            user_log_directory("win32", {"LOCALAPPDATA": r"C:\Users\A\AppData\Local"}, Path("C:/ignored")),
+            Path(r"C:\Users\A\AppData\Local") / "Espresso Compresso" / "logs",
+        )
+        self.assertEqual(
+            user_log_directory("darwin", {}, Path("/Users/a")),
+            Path("/Users/a/Library/Logs/Espresso Compresso"),
+        )
+        self.assertEqual(
+            fallback_log_path("20260815_120000", "linux", {"XDG_STATE_HOME": "/state"}, Path("/home/a")),
+            Path("/state/espresso-compresso/logs/compression_log_20260815_120000.txt"),
+        )
 
     def test_activity_filters_technical_output_and_keeps_meaningful_events(self) -> None:
         self.assertEqual(activity_from_output("[2/3] Holiday clip.mp4"), "File 2 of 3: Holiday clip.mp4")
