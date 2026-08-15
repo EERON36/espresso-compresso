@@ -23,12 +23,14 @@ from espresso_compresso_cli import (
     VideoTask,
     build_tasks,
     decode_integrity,
+    discard_larger_temporary,
     delete_source_safely,
     discover_videos,
     emit_terminal_result,
     find_ffmpeg,
     fps_arguments,
     maybe_delete_original,
+    observe_free_space,
     output_location_error,
     preflight_mode,
     terminal_result,
@@ -215,6 +217,27 @@ class CompressorSafetyTests(unittest.TestCase):
             self.assertEqual(stats.originals_deleted, 0)
             self.assertEqual(stats.deletion_kept, 1)
 
+    def test_larger_output_cleanup_failure_counts_the_kept_original(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            temporary = root / "source.partial.mkv"
+            source = root / "source.mp4"
+            temporary.write_bytes(b"larger output")
+            source.write_bytes(b"source")
+            logger = BatchLogger(root / "test.log", root / "fallback.log")
+            stats = BatchStats()
+            try:
+                with patch.object(Path, "unlink", side_effect=OSError("locked")):
+                    discarded = discard_larger_temporary(
+                        temporary, source, 20.0, SimpleNamespace(delete_originals=True), stats, logger,
+                    )
+            finally:
+                logger.close()
+            self.assertFalse(discarded)
+            self.assertTrue(source.exists())
+            self.assertEqual(stats.failed, 1)
+            self.assertEqual(stats.deletion_kept, 1)
+
     def test_deletion_boundary_rejects_output_folder_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -276,7 +299,7 @@ class CompressorSafetyTests(unittest.TestCase):
         self.assertEqual(title, "Original removal results")
         self.assertTrue(attention)
         self.assertIn("Originals deleted: 1", message)
-        self.assertIn("Originals kept: 2", message)
+        self.assertIn("Originals kept by safety checks: 2", message)
         self.assertIn("Available disk space increased", message)
 
     def test_removal_popup_words_positive_zero_and_negative_space_separately(self) -> None:
@@ -304,9 +327,30 @@ class CompressorSafetyTests(unittest.TestCase):
             "known_output_bytes": 100, "compression_reduction_bytes": 900,
             "free_space_volumes": [{"volume": "C:\\\\", "change_bytes": 20}],
         }
-        title, _, attention = removal_result_message(result)
+        title, message, attention = removal_result_message(result)
         self.assertEqual(title, "Original removal results")
         self.assertTrue(attention)
+        self.assertIn("Unprocessed originals remain unchanged", message)
+
+    def test_posix_free_space_observations_keep_distinct_devices(self) -> None:
+        first = unittest.mock.MagicMock()
+        first.resolve.return_value = first
+        first.stat.return_value = SimpleNamespace(st_dev=101)
+        first.drive = ""
+        first.anchor = "/"
+        first.__str__.return_value = "/mnt/recordings"
+        second = unittest.mock.MagicMock()
+        second.resolve.return_value = second
+        second.stat.return_value = SimpleNamespace(st_dev=202)
+        second.drive = ""
+        second.anchor = "/"
+        second.__str__.return_value = "/mnt/archive"
+        with patch("espresso_compresso_cli._existing_directory", side_effect=[first, second]), \
+             patch("espresso_compresso_cli.shutil.disk_usage", side_effect=[
+                 SimpleNamespace(free=100), SimpleNamespace(free=200),
+             ]):
+            observed = observe_free_space([Path("first"), Path("second")])
+        self.assertEqual(observed, {"/mnt/recordings": 100, "/mnt/archive": 200})
 
     def test_terminal_result_has_stable_required_fields(self) -> None:
         stats = BatchStats(encoded=2, existing_verified=1, originals_deleted=1, deletion_kept=1,

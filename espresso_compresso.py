@@ -86,9 +86,9 @@ def removal_result_message(result: dict[str, object] | None) -> tuple[str, str, 
     outcome = str(result.get("outcome", "complete-with-issues"))
     needs_attention = outcome != "complete" or kept > 0 or failed > 0
     title = "Original removal results" if needs_attention else "Original removal complete"
-    lines = [f"Originals deleted: {deleted}", f"Originals kept: {kept}"]
+    lines = [f"Originals deleted: {deleted}", f"Originals kept by safety checks: {kept}"]
     if outcome == "stopped":
-        lines.insert(0, "The job was stopped before all files completed.")
+        lines.insert(0, "The job was stopped before all files completed. Unprocessed originals remain unchanged.")
     elif outcome == "complete-with-issues":
         lines.insert(0, "Some files need attention.")
     volumes = result.get("free_space_volumes", [])
@@ -1301,7 +1301,8 @@ class CompressorApp:
         if not messagebox.askyesno(
             "Stop compression?",
             "The current encode will be asked to stop. Completed outputs remain available; "
-            "an incomplete temporary file is kept for inspection.",
+            "an incomplete temporary file is kept for inspection. Originals already deleted "
+            "for completed files stay deleted.",
             parent=self.root,
         ):
             return

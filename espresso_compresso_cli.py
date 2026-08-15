@@ -745,7 +745,9 @@ def observe_free_space(paths: Iterable[Path]) -> dict[str, int]:
             if device in seen_devices:
                 continue
             seen_devices.add(device)
-            label = str(directory.anchor) or str(directory)
+            # POSIX paths always have / as their anchor, even when they are on
+            # different mounts. Windows drive labels remain compact and familiar.
+            label = str(directory.anchor) if directory.drive else str(directory)
             observations[label] = shutil.disk_usage(directory).free
         except OSError:
             continue
@@ -829,6 +831,27 @@ def print_summary(stats: BatchStats, logger: BatchLogger) -> None:
     for line in lines:
         print(line)
     logger.write(lines)
+
+
+def discard_larger_temporary(
+    temporary: Path, source: Path, increase: float, args: argparse.Namespace,
+    stats: BatchStats, logger: BatchLogger,
+) -> bool:
+    """Discard an unhelpfully larger output without losing the original count."""
+    try:
+        temporary.unlink()
+    except OSError as error:
+        print(f"  FAILED: larger temporary output could not be removed: {error}\n")
+        logger.write([f"FAILED CLEANING TEMPORARY OUTPUT: {temporary}: {error}"])
+        stats.failed += 1
+        mark_original_kept(args, stats)
+        return False
+    print(f"  NO SIZE BENEFIT: output was {increase:.1f}% larger and was discarded.")
+    print("  Original kept.\n")
+    logger.write([f"DISCARDED LARGER OUTPUT: {source} ({increase:.1f}% larger)"])
+    stats.no_benefit += 1
+    mark_original_kept(args, stats)
+    return True
 
 
 def main() -> int:
@@ -1050,18 +1073,9 @@ def main() -> int:
                 and not args.keep_larger
             ):
                 increase = (output_size / source_stat.st_size - 1) * 100
-                try:
-                    temporary.unlink()
-                except OSError as error:
-                    print(f"  FAILED: larger temporary output could not be removed: {error}\n")
-                    logger.write([f"FAILED CLEANING TEMPORARY OUTPUT: {temporary}: {error}"])
-                    stats.failed += 1
-                    continue
-                print(f"  NO SIZE BENEFIT: output was {increase:.1f}% larger and was discarded.")
-                print("  Original kept.\n")
-                logger.write([f"DISCARDED LARGER OUTPUT: {task.source} ({increase:.1f}% larger)"])
-                stats.no_benefit += 1
-                mark_original_kept(args, stats)
+                discard_larger_temporary(
+                    temporary, task.source, increase, args, stats, logger,
+                )
                 continue
             try:
                 temporary.replace(task.destination)
