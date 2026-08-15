@@ -13,18 +13,12 @@ separate media-tool executables and includes their notices under `LICENSES/`.
 
 ## FFmpeg 8.1.2 essentials build (Windows x64)
 
-The v1.0.0 builder refuses to proceed until all of these release-specific fields
-are supplied and the archive checksum matches:
-
-- Exact archive URL: **REQUIRED at build time** (`-FfmpegArchiveUrl`)
-- Archive SHA-256: **REQUIRED at build time** (`-FfmpegArchiveSha256`)
-- Corresponding source URL and source checksum: **REQUIRED at build time**
-  (`-FfmpegSourceUrl`, `-FfmpegSourceSha256`) and record here before release
+- Archive: <https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip>
+- Archive SHA-256: `db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec`
+- Corresponding source: <https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz>
+- Source archive SHA-256: `464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`
 - License and notices: copied from the verified archive into `LICENSES/FFmpeg/`
 
-The assembled ZIP also contains `THIRD_PARTY_PROVENANCE.txt` with the exact
-archive/source URLs and checksums provided to the release builder.
-
-Do not substitute a different FFmpeg build or infer its license. Record its
-exact version/configuration and all final binary/DLL hashes in the release
-`SHA256SUMS.txt` and this notice before publication.
+The release builder only accepts these v1.0.0 FFmpeg provenance values and
+records them in `THIRD_PARTY_PROVENANCE.txt`. `SHA256SUMS.txt` records the final
+binary and DLL hashes. Do not substitute a different FFmpeg build.

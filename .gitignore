@@ -8,8 +8,10 @@ compression_log_*.txt
 _compressed/
 .qa_*/
 .release-build-venv/
+.release-build/
 release/
 release-cache/
+.release-cache/
 vendor/
 packaging/*.ico
 
