@@ -8,7 +8,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import espresso_compresso_cli as cli
-from espresso_compresso import result_space_from_summary
+from espresso_compresso import (
+    deletion_choice_for_scope,
+    parse_terminal_result,
+    removal_result_message,
+    result_space_from_summary,
+)
 from espresso_compresso_cli import (
     BatchLogger,
     BatchStats,
@@ -20,11 +25,13 @@ from espresso_compresso_cli import (
     decode_integrity,
     delete_source_safely,
     discover_videos,
+    emit_terminal_result,
     find_ffmpeg,
     fps_arguments,
     maybe_delete_original,
     output_location_error,
     preflight_mode,
+    terminal_result,
     validate_output,
 )
 
@@ -92,16 +99,19 @@ class CompressorSafetyTests(unittest.TestCase):
             destination.write_bytes(b"small")
             source_stat = source.stat()
             logger = BatchLogger(output / "test.log", output / "fallback.log")
+            stats = BatchStats()
             try:
                 deleted = maybe_delete_original(
                     SimpleNamespace(delete_originals=True), VideoTask(source, destination), root, output,
                     source_stat.st_size, source_stat.st_mtime_ns, destination.stat().st_size,
-                    BatchStats(), logger, False, None, media(),
+                    stats, logger, False, None, media(),
                 )
             finally:
                 logger.close()
             self.assertFalse(deleted)
             self.assertTrue(source.exists())
+            self.assertEqual(stats.originals_deleted, 0)
+            self.assertEqual(stats.deletion_kept, 1)
 
     def test_new_output_without_ffmpeg_never_authorizes_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -114,16 +124,19 @@ class CompressorSafetyTests(unittest.TestCase):
             destination.write_bytes(b"small")
             source_stat = source.stat()
             logger = BatchLogger(output / "test.log", output / "fallback.log")
+            stats = BatchStats()
             try:
                 deleted = maybe_delete_original(
                     SimpleNamespace(delete_originals=True), VideoTask(source, destination), root, output,
                     source_stat.st_size, source_stat.st_mtime_ns, destination.stat().st_size,
-                    BatchStats(), logger, True, None, media(),
+                    stats, logger, True, None, media(),
                 )
             finally:
                 logger.close()
             self.assertFalse(deleted)
             self.assertTrue(source.exists())
+            self.assertEqual(stats.originals_deleted, 0)
+            self.assertEqual(stats.deletion_kept, 1)
 
     def test_new_smaller_integrity_approved_output_deletes_only_its_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -150,6 +163,57 @@ class CompressorSafetyTests(unittest.TestCase):
             self.assertTrue(deleted)
             self.assertFalse(source.exists())
             self.assertTrue(untouched.exists())
+
+    def test_changed_source_stays_and_is_counted_as_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "_compressed"
+            output.mkdir()
+            source = root / "source.mp4"
+            destination = output / "source.compressed.mkv"
+            source.write_bytes(b"source data is larger")
+            destination.write_bytes(b"small")
+            source_stat = source.stat()
+            source.write_bytes(b"source data changed after encoding")
+            logger = BatchLogger(output / "test.log", output / "fallback.log")
+            stats = BatchStats()
+            try:
+                with patch("espresso_compresso_cli.decode_integrity", return_value=(True, "")):
+                    deleted = maybe_delete_original(
+                        SimpleNamespace(delete_originals=True), VideoTask(source, destination), root, output,
+                        source_stat.st_size, source_stat.st_mtime_ns, destination.stat().st_size,
+                        stats, logger, True, Path("ffmpeg"), media(),
+                    )
+            finally:
+                logger.close()
+            self.assertFalse(deleted)
+            self.assertTrue(source.exists())
+            self.assertEqual(stats.originals_deleted, 0)
+            self.assertEqual(stats.deletion_kept, 1)
+
+    def test_larger_output_stays_and_is_counted_as_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "_compressed"
+            output.mkdir()
+            source = root / "source.mp4"
+            destination = output / "source.compressed.mkv"
+            source.write_bytes(b"small")
+            destination.write_bytes(b"larger output")
+            stat = source.stat()
+            logger = BatchLogger(output / "test.log", output / "fallback.log")
+            stats = BatchStats()
+            try:
+                deleted = maybe_delete_original(
+                    SimpleNamespace(delete_originals=True), VideoTask(source, destination), root, output,
+                    stat.st_size, stat.st_mtime_ns, destination.stat().st_size,
+                    stats, logger, True, Path("ffmpeg"), media(),
+                )
+            finally:
+                logger.close()
+            self.assertFalse(deleted)
+            self.assertEqual(stats.originals_deleted, 0)
+            self.assertEqual(stats.deletion_kept, 1)
 
     def test_deletion_boundary_rejects_output_folder_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -183,9 +247,87 @@ class CompressorSafetyTests(unittest.TestCase):
         self.assertEqual(fps_arguments(media(fps=24), MODES["editing"], 30), ["--cfr"])
 
     def test_result_space_summary_handles_reduction_and_increase(self) -> None:
-        self.assertEqual(result_space_from_summary("Compression reduction: 1.0 GB (50.0%)"), "Saved: 1.0 GB (50.0%)")
-        self.assertEqual(result_space_from_summary("Compression increase: 1.0 GB (50.0%)"), "Used: 1.0 GB (50.0%)")
+        self.assertEqual(result_space_from_summary("Compression reduction: 1.0 GB (50.0%)"), "Compression reduction: 1.0 GB (50.0%)")
+        self.assertEqual(result_space_from_summary("Compression increase: 1.0 GB (50.0%)"), "Compression increase: 1.0 GB (50.0%)")
         self.assertEqual(result_space_from_summary("unrelated"), None)
+
+    def test_three_file_scope_forces_keep_and_full_scope_requires_explicit_delete(self) -> None:
+        self.assertEqual(deletion_choice_for_scope("test", "delete"), "keep")
+        self.assertEqual(deletion_choice_for_scope("all", "keep"), "keep")
+        self.assertEqual(deletion_choice_for_scope("all", "delete"), "delete")
+
+    def test_structured_terminal_result_parsing_and_mixed_counts(self) -> None:
+        result = {
+            "outcome": "complete-with-issues",
+            "deletion_requested": True,
+            "encoded": 2,
+            "existing_verified": 1,
+            "originals_deleted": 1,
+            "originals_retained_by_safeguards": 2,
+            "failed": 1,
+            "no_benefit": 1,
+            "compression_reduction_bytes": 900,
+            "known_output_bytes": 100,
+            "free_space_volumes": [{"volume": "C:\\\\", "change_bytes": 50}],
+        }
+        line = "RESULT_JSON: " + cli.json.dumps(result)
+        self.assertEqual(parse_terminal_result(line), result)
+        title, message, attention = removal_result_message(result)
+        self.assertEqual(title, "Original removal results")
+        self.assertTrue(attention)
+        self.assertIn("Originals deleted: 1", message)
+        self.assertIn("Originals kept: 2", message)
+        self.assertIn("Available disk space increased", message)
+
+    def test_removal_popup_words_positive_zero_and_negative_space_separately(self) -> None:
+        base = {
+            "outcome": "complete",
+            "originals_deleted": 1,
+            "originals_retained_by_safeguards": 0,
+            "failed": 0,
+            "known_output_bytes": 100,
+            "compression_reduction_bytes": 900,
+        }
+        for change, expected in [
+            (100, "Available disk space increased"),
+            (0, "No net disk space was freed"),
+            (-100, "additional space used"),
+        ]:
+            result = {**base, "free_space_volumes": [{"volume": "C:\\\\", "change_bytes": change}]}
+            _, message, _ = removal_result_message(result)
+            self.assertIn(expected, message)
+
+    def test_stopped_result_uses_attention_wording(self) -> None:
+        result = {
+            "outcome": "stopped", "originals_deleted": 1,
+            "originals_retained_by_safeguards": 0, "failed": 0,
+            "known_output_bytes": 100, "compression_reduction_bytes": 900,
+            "free_space_volumes": [{"volume": "C:\\\\", "change_bytes": 20}],
+        }
+        title, _, attention = removal_result_message(result)
+        self.assertEqual(title, "Original removal results")
+        self.assertTrue(attention)
+
+    def test_terminal_result_has_stable_required_fields(self) -> None:
+        stats = BatchStats(encoded=2, existing_verified=1, originals_deleted=1, deletion_kept=1,
+                           failed=1, no_benefit=1, input_bytes=1000, output_bytes=100)
+        with patch("espresso_compresso_cli.free_space_results", return_value=[]):
+            result = terminal_result("complete-with-issues", stats, True, {}, [Path.cwd()])
+        self.assertEqual(result["compression_reduction_bytes"], 900)
+        self.assertEqual(result["known_output_bytes"], 100)
+        self.assertEqual(result["originals_deleted"], 1)
+        self.assertEqual(result["originals_retained_by_safeguards"], 1)
+
+    def test_terminal_result_is_written_to_the_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logger = BatchLogger(root / "run.log", root / "fallback.log")
+            try:
+                with patch("espresso_compresso_cli.free_space_results", return_value=[]):
+                    emit_terminal_result("complete", BatchStats(), True, {}, [root], logger)
+            finally:
+                logger.close()
+            self.assertIn("RESULT_JSON:", (root / "run.log").read_text(encoding="utf-8"))
 
     def test_integrity_decode_with_generated_temporary_media(self) -> None:
         ffmpeg = find_ffmpeg(None)

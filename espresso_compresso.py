@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -12,7 +13,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from espresso_compresso_cli import (
     MODES,
@@ -49,16 +50,76 @@ class Palette:
 def result_space_from_summary(line: str) -> str | None:
     """Keep result wording compact and testable without starting Tk."""
     if line.startswith("Compression reduction:"):
-        return line.replace("Compression reduction:", "Saved:", 1).strip()
-    if line.startswith("Compression increase:"):
-        return line.replace("Compression increase:", "Used:", 1).strip()
-    if line.startswith("Disk space freed this run:"):
-        return line.replace(" this run", "", 1).strip()
-    if line.startswith("Disk space freed:"):
         return line.strip()
-    if line.startswith("Additional disk space used this run:"):
-        return line.replace(" this run", "", 1).strip()
+    if line.startswith("Compression increase:"):
+        return line.strip()
     return None
+
+
+def parse_terminal_result(line: str) -> dict[str, object] | None:
+    """Read the CLI's stable terminal record without relying on display prose."""
+    if not line.startswith("RESULT_JSON:"):
+        return None
+    try:
+        result = json.loads(line.split(":", 1)[1].strip())
+    except (json.JSONDecodeError, IndexError):
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def deletion_choice_for_scope(scope: str, requested: str) -> str:
+    """The three-file test is always non-destructive."""
+    return "delete" if scope == "all" and requested == "delete" else "keep"
+
+
+def removal_result_message(result: dict[str, object] | None) -> tuple[str, str, bool]:
+    """Return accessible popup copy for a structured removal result."""
+    if result is None:
+        return (
+            "Original removal results",
+            "Disk-space change could not be confirmed. Review Details for the final log.",
+            True,
+        )
+    deleted = int(result.get("originals_deleted", 0))
+    kept = int(result.get("originals_retained_by_safeguards", 0))
+    failed = int(result.get("failed", 0))
+    outcome = str(result.get("outcome", "complete-with-issues"))
+    needs_attention = outcome != "complete" or kept > 0 or failed > 0
+    title = "Original removal results" if needs_attention else "Original removal complete"
+    lines = [f"Originals deleted: {deleted}", f"Originals kept: {kept}"]
+    if outcome == "stopped":
+        lines.insert(0, "The job was stopped before all files completed.")
+    elif outcome == "complete-with-issues":
+        lines.insert(0, "Some files need attention.")
+    volumes = result.get("free_space_volumes", [])
+    if not isinstance(volumes, list) or not volumes:
+        lines.append("Disk-space change could not be confirmed. Review Details.")
+        needs_attention = True
+        title = "Original removal results"
+    else:
+        for volume in volumes:
+            if not isinstance(volume, dict):
+                continue
+            label = str(volume.get("volume", "This drive"))
+            change = volume.get("change_bytes")
+            if not isinstance(change, int):
+                lines.append(f"{label}: disk-space change could not be confirmed.")
+            elif change > 0:
+                lines.append(f"{label}: Available disk space increased by {format_size(change)}.")
+            elif change < 0:
+                lines.append(f"{label}: No net disk space was freed; additional space used: {format_size(change)}.")
+            else:
+                lines.append(f"{label}: No net disk space was freed.")
+    known_output = result.get("known_output_bytes")
+    reduction = result.get("compression_reduction_bytes")
+    if isinstance(known_output, int):
+        lines.append(f"Known compressed copies: {format_size(known_output)}")
+    if isinstance(reduction, int):
+        label = "Compression reduction" if reduction >= 0 else "Compression increase"
+        lines.append(f"{label}: {format_size(reduction)}")
+    if failed:
+        lines.append(f"Files needing attention: {failed}")
+    return title, "\n".join(lines), needs_attention
 
 
 class CompressorApp:
@@ -81,12 +142,14 @@ class CompressorApp:
         self.empty_folder = False
         self.receipt = {"compressed": 0, "complete": 0, "skipped": 0, "attention": 0}
         self.reader_error: str | None = None
+        self.terminal_result: dict[str, object] | None = None
+        self.delete_requested_for_job = False
 
         self.folder_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="quality")
         self.scope_var = tk.StringVar(value="test")
         self.fps_cap_var = tk.BooleanVar(value=True)
-        self.delete_var = tk.BooleanVar(value=False)
+        self.originals_var = tk.StringVar(value="keep")
         self.output_var = tk.StringVar()
 
         self.status_var = tk.StringVar(value="Ready")
@@ -487,6 +550,42 @@ class CompressorApp:
             style="Warm.TCheckbutton",
         )
         self.fps_check.grid(row=0, column=2, sticky="e")
+        tk.Label(
+            card,
+            text="After compression",
+            bg=Palette.SURFACE,
+            fg=Palette.INK,
+            font=("Segoe UI Semibold", 10),
+        ).pack(anchor="w", pady=(12, 3))
+        self.originals_row = tk.Frame(card, bg=Palette.SURFACE)
+        self.originals_row.pack(fill="x")
+        self.keep_originals_radio = ttk.Radiobutton(
+            self.originals_row,
+            text="Keep originals (recommended)",
+            variable=self.originals_var,
+            value="keep",
+            style="Warm.TRadiobutton",
+        )
+        self.keep_originals_radio.pack(anchor="w")
+        self.delete_originals_radio = ttk.Radiobutton(
+            self.originals_row,
+            text="Delete originals after verified compression",
+            variable=self.originals_var,
+            value="delete",
+            style="Warm.TRadiobutton",
+        )
+        self.delete_originals_radio.pack(anchor="w", pady=(3, 0))
+        self.deletion_note_var = tk.StringVar()
+        self.deletion_note = tk.Label(
+            card,
+            textvariable=self.deletion_note_var,
+            bg=Palette.SURFACE,
+            fg=Palette.RED,
+            font=("Segoe UI", 10),
+            justify="left",
+            anchor="w",
+        )
+        self.deletion_note.pack(anchor="w", pady=(3, 0))
 
     def _build_advanced_card(self, parent: tk.Widget) -> None:
         self.advanced_toggle = tk.Button(
@@ -532,21 +631,6 @@ class CompressorApp:
             self.advanced_card, "CHOOSE", self._browse_output, Palette.BLUE,
         )
         self.output_button.grid(row=1, column=1, padx=(9, 0), pady=(5, 11), ipady=2)
-        self.delete_check = ttk.Checkbutton(
-            self.advanced_card,
-            text="Permanently delete originals after validation and size reduction",
-            variable=self.delete_var,
-            style="Warm.TCheckbutton",
-        )
-        self.delete_check.grid(row=2, column=0, sticky="w", columnspan=2)
-        self.delete_note = tk.Label(
-            self.advanced_card,
-            text="Available only for a full-folder job. You will be asked to type DELETE.",
-            bg=Palette.SURFACE,
-            fg=Palette.RED,
-            font=("Segoe UI", 10),
-        )
-        self.delete_note.grid(row=3, column=0, sticky="w", columnspan=2, pady=(3, 0))
 
     def _build_action_bar(self, parent: tk.Widget) -> None:
         bar = tk.Frame(parent, bg=Palette.BACKGROUND)
@@ -769,14 +853,21 @@ class CompressorApp:
             self.output_var.set(selected)
 
     def _scope_changed(self, *_args) -> None:
-        if not hasattr(self, "delete_check"):
+        if not hasattr(self, "delete_originals_radio"):
             return
         if self.scope_var.get() == "test":
-            self.delete_var.set(False)
-            self.delete_check.state(["disabled"])
+            self.originals_var.set("keep")
+            self.delete_originals_radio.state(["disabled"])
+            self.deletion_note_var.set("Test runs never delete originals.")
         else:
-            self.delete_check.state(["!disabled"])
+            self.delete_originals_radio.state(["!disabled"])
+            self.deletion_note_var.set(
+                "Deletion is irreversible. Choose it explicitly for the full-folder job."
+            )
         self._schedule_preflight()
+
+    def _select_keep_originals(self) -> None:
+        self.originals_var.set("keep")
 
     def _schedule_preflight(self, *_args) -> None:
         if self.process is not None:
@@ -856,6 +947,7 @@ class CompressorApp:
                 "Choose a folder containing your recordings before starting.",
                 parent=self.root,
             )
+            self._select_keep_originals()
             return
         if not COMPRESSOR.is_file():
             messagebox.showerror(
@@ -863,11 +955,13 @@ class CompressorApp:
                 f"The compression engine could not be found:\n{COMPRESSOR}",
                 parent=self.root,
             )
+            self._select_keep_originals()
             return
 
         mode_errors = preflight_mode(self.toolchain, MODES[self.mode_var.get()])
         if mode_errors:
             messagebox.showerror("Mode unavailable", "\n".join(mode_errors), parent=self.root)
+            self._select_keep_originals()
             return
 
         output_text = self.output_var.get().strip().strip('"')
@@ -879,6 +973,7 @@ class CompressorApp:
         if output_error:
             self._set_status("Choose another output folder", Palette.RED)
             messagebox.showerror("Output folder", output_error, parent=self.root)
+            self._select_keep_originals()
             return
         try:
             videos = discover_videos(folder.resolve(), output_path)
@@ -888,6 +983,7 @@ class CompressorApp:
         except OSError as error:
             self._set_status("Could not inspect folder", Palette.RED)
             messagebox.showerror("Could not inspect folder", str(error), parent=self.root)
+            self._select_keep_originals()
             return
         if not videos:
             self.empty_folder = True
@@ -895,22 +991,28 @@ class CompressorApp:
             self.current_file_var.set("No supported source videos were found outside the output folder.")
             self.queue_summary_var.set(f"Output folder: {output_path}")
             self.file_text_var.set("Nothing to do")
+            self._select_keep_originals()
             return
 
-        delete_originals = self.delete_var.get() and self.scope_var.get() == "all"
+        delete_originals = deletion_choice_for_scope(
+            self.scope_var.get(), self.originals_var.get(),
+        ) == "delete"
         if delete_originals:
-            confirmation = simpledialog.askstring(
+            confirmed = messagebox.askyesno(
                 "Permanent deletion",
-                "Originals will be permanently deleted only after validation and only "
-                "when the compressed file is smaller.\n\nType DELETE to continue:",
+                "Yes will start compression and permanently delete each original only after "
+                "all safety checks pass. This is irreversible.\n\n"
+                "If you stop later, already completed originals may already have been removed.\n\n"
+                "Choose Yes to continue, or No to cancel.",
                 parent=self.root,
             )
-            if confirmation != "DELETE":
+            if not confirmed:
                 messagebox.showinfo(
                     "Deletion cancelled",
                     "The job was not started. Your originals are unchanged.",
                     parent=self.root,
                 )
+                self._select_keep_originals()
                 return
 
         command = [
@@ -928,6 +1030,7 @@ class CompressorApp:
         if output_text:
             command.extend(["--output-folder", str(output_path)])
         self.output_path = output_path
+        self.delete_requested_for_job = delete_originals
         if delete_originals:
             command.append("--delete-originals")
 
@@ -967,6 +1070,8 @@ class CompressorApp:
             self.process = None
             self._set_running(False)
             messagebox.showerror("Could not start", str(error), parent=self.root)
+            self.delete_requested_for_job = False
+            self._select_keep_originals()
             return
 
         self.reader_thread = threading.Thread(target=self._read_process, daemon=True)
@@ -1033,6 +1138,11 @@ class CompressorApp:
 
     def _handle_output_line(self, line: str) -> None:
         self._append_detail(line + "\n")
+
+        result = parse_terminal_result(line)
+        if result is not None:
+            self.terminal_result = result
+            return
 
         file_match = re.match(r"\[(\d+)/(\d+)\]\s+(.+)", line)
         if file_match:
@@ -1171,6 +1281,17 @@ class CompressorApp:
             self._update_queue_summary()
             if not self.details_visible:
                 self._toggle_details()
+        if self.delete_requested_for_job:
+            title, message, needs_attention = removal_result_message(self.terminal_result)
+            if needs_attention:
+                self._set_status("Needs attention", Palette.RED)
+                self.current_file_var.set("Original removal needs attention. Review Details.")
+                self.file_text_var.set("Review details")
+                if not self.details_visible:
+                    self._toggle_details()
+            messagebox.showinfo(title, message, parent=self.root)
+        self.delete_requested_for_job = False
+        self._select_keep_originals()
         self.stopping = False
 
     def _stop_job(self) -> None:
@@ -1228,7 +1349,8 @@ class CompressorApp:
         self.output_entry.configure(state=state)
         self.output_button.configure(state=state)
         self.fps_check.state(["disabled"] if running else ["!disabled"])
-        self.delete_check.state(["disabled"] if running else ["!disabled"])
+        self.keep_originals_radio.state(["disabled"] if running else ["!disabled"])
+        self.delete_originals_radio.state(["disabled"] if running else ["!disabled"])
         for control in self.scope_controls:
             control.state(["disabled"] if running else ["!disabled"])
         for button in self.mode_buttons:
@@ -1253,6 +1375,7 @@ class CompressorApp:
         self.empty_folder = False
         self.receipt = {"compressed": 0, "complete": 0, "skipped": 0, "attention": 0}
         self.reader_error = None
+        self.terminal_result = None
         self.file_finished = False
         self.overall_progress["value"] = 0
         self.file_progress["value"] = 0
@@ -1260,7 +1383,7 @@ class CompressorApp:
         self.queue_summary_var.set("Counting videos in the folder...")
         self.file_text_var.set("Inspecting")
         self.result_count_var.set("0 compressed")
-        self.result_space_var.set("Calculating savings")
+        self.result_space_var.set("Calculating compression result")
         self.open_button.configure(state="disabled", bg=Palette.MUTED)
         self.details_text.configure(state="normal")
         self.details_text.delete("1.0", "end")

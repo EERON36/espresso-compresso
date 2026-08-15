@@ -103,7 +103,6 @@ class BatchStats:
     originals_deleted: int = 0
     input_bytes: int = 0
     output_bytes: int = 0
-    disk_change: int = 0  # Positive means space freed; negative means space used.
 
 
 def quality_value(value: str) -> float:
@@ -687,7 +686,7 @@ def maybe_delete_original(
         if integrity_ok:
             reason = ""
     if reason:
-        stats.deletion_kept += 1
+        mark_original_kept(args, stats)
         print(f"  ORIGINAL KEPT: {reason}\n")
         logger.write([f"ORIGINAL KEPT: {task.source}: {reason}"])
         return False
@@ -695,14 +694,20 @@ def maybe_delete_original(
         task.source, input_root, output_root, source_size, source_mtime_ns,
     )
     if not deleted:
+        mark_original_kept(args, stats)
         print(f"  ORIGINAL KEPT: {reason}\n")
         logger.write([f"ORIGINAL KEPT: {task.source}: {reason}"])
         return False
     stats.originals_deleted += 1
-    stats.disk_change += source_size - output_size if output_was_created_now else source_size
     print("  Original permanently deleted after validation.\n")
     logger.write([f"ORIGINAL DELETED: {task.source}"])
     return True
+
+
+def mark_original_kept(args: argparse.Namespace, stats: BatchStats) -> None:
+    """Count every original retained during a deletion-requested run once."""
+    if args.delete_originals:
+        stats.deletion_kept += 1
 
 
 def confirm_deletion(input_root: Path, task_count: int) -> bool:
@@ -718,36 +723,112 @@ def confirm_deletion(input_root: Path, task_count: int) -> bool:
     return answer == "DELETE"
 
 
+def _existing_directory(path: Path) -> Path:
+    """Return an existing directory for a free-space query."""
+    current = path
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return current if current.is_dir() else current.parent
+
+
+def observe_free_space(paths: Iterable[Path]) -> dict[str, int]:
+    """Capture available bytes once per filesystem, using friendly volume labels."""
+    observations: dict[str, int] = {}
+    seen_devices: set[int] = set()
+    for path in paths:
+        try:
+            directory = _existing_directory(path).resolve()
+            device = directory.stat().st_dev
+            if device in seen_devices:
+                continue
+            seen_devices.add(device)
+            label = str(directory.anchor) or str(directory)
+            observations[label] = shutil.disk_usage(directory).free
+        except OSError:
+            continue
+    return observations
+
+
+def free_space_results(start: dict[str, int], paths: Iterable[Path]) -> list[dict[str, int | str | None]]:
+    """Compare terminal free space with the start snapshot, volume by volume."""
+    end = observe_free_space(paths)
+    results: list[dict[str, int | str | None]] = []
+    for volume, start_free in start.items():
+        end_free = end.get(volume)
+        results.append({
+            "volume": volume,
+            "start_free_bytes": start_free,
+            "end_free_bytes": end_free,
+            "change_bytes": end_free - start_free if end_free is not None else None,
+        })
+    return results
+
+
+def terminal_result(
+    outcome: str, stats: BatchStats, delete_requested: bool,
+    start_free_space: dict[str, int], volume_paths: Iterable[Path],
+) -> dict[str, object]:
+    """Stable end-of-run record for the GUI and the text log."""
+    return {
+        "outcome": outcome,
+        "deletion_requested": delete_requested,
+        "encoded": stats.encoded,
+        "existing_verified": stats.existing_verified,
+        "originals_deleted": stats.originals_deleted,
+        "originals_retained_by_safeguards": stats.deletion_kept,
+        "failed": stats.failed,
+        "no_benefit": stats.no_benefit,
+        "compression_reduction_bytes": stats.input_bytes - stats.output_bytes,
+        "known_output_bytes": stats.output_bytes,
+        "free_space_volumes": free_space_results(start_free_space, volume_paths),
+    }
+
+
+def emit_terminal_result(
+    outcome: str, stats: BatchStats, delete_requested: bool,
+    start_free_space: dict[str, int], volume_paths: Iterable[Path],
+    logger: BatchLogger | None = None,
+) -> dict[str, object]:
+    result = terminal_result(outcome, stats, delete_requested, start_free_space, volume_paths)
+    line = "RESULT_JSON: " + json.dumps(result, sort_keys=True)
+    print(line)
+    if logger:
+        logger.write([line])
+    return result
+
+
 def output_is_efficient(info: MediaInfo) -> bool:
     return normalize_codec(info.video_codec) in EFFICIENT_CODECS
 
 
-def print_summary(stats: BatchStats, logger: BatchLogger, originals_kept_by_default: bool) -> None:
-    print("Summary")
-    print(f"  Encoded and validated: {stats.encoded}")
-    print(f"  Existing outputs verified: {stats.existing_verified}")
-    print(f"  Efficient sources skipped: {stats.efficient_skipped}")
-    print(f"  No-size-benefit outputs discarded: {stats.no_benefit}")
-    print(f"  Other skipped: {stats.other_skipped}")
-    print(f"  Failed or needs attention: {stats.failed}")
+def print_summary(stats: BatchStats, logger: BatchLogger) -> None:
+    lines = [
+        "Summary",
+        f"  Encoded and validated: {stats.encoded}",
+        f"  Existing outputs verified: {stats.existing_verified}",
+        f"  Efficient sources skipped: {stats.efficient_skipped}",
+        f"  No-size-benefit outputs discarded: {stats.no_benefit}",
+        f"  Other skipped: {stats.other_skipped}",
+        f"  Failed or needs attention: {stats.failed}",
+    ]
     if stats.input_bytes:
-        print(f"  Encoded input size:  {format_size(stats.input_bytes)}")
-        print(f"  Encoded output size: {format_size(stats.output_bytes)}")
+        lines.append(f"  Encoded input size:  {format_size(stats.input_bytes)}")
+        lines.append(f"  Known compressed-copy size: {format_size(stats.output_bytes)}")
         difference = stats.input_bytes - stats.output_bytes
         percentage = abs(difference) / stats.input_bytes * 100
         label = "Compression reduction" if difference >= 0 else "Compression increase"
-        print(f"  {label}: {format_size(difference)} ({percentage:.1f}%)")
+        lines.append(f"  {label}: {format_size(difference)} ({percentage:.1f}%)")
     if stats.originals_deleted:
-        print(f"  Originals deleted: {stats.originals_deleted}")
+        lines.append(f"  Originals deleted: {stats.originals_deleted}")
     if stats.deletion_kept:
-        print(f"  Originals kept by a deletion safeguard: {stats.deletion_kept}")
-    if stats.disk_change > 0:
-        print(f"  Disk space freed this run: {format_size(stats.disk_change)}")
-    elif stats.disk_change < 0:
-        print(f"  Additional disk space used this run: {format_size(stats.disk_change)}")
-    elif originals_kept_by_default and stats.encoded:
-        print("  Disk space freed: 0 B (originals were kept)")
-    print(f"  Log: {logger.path}")
+        lines.append(f"  Originals kept by a deletion safeguard: {stats.deletion_kept}")
+    lines.append(f"  Log: {logger.path}")
+    for line in lines:
+        print(line)
+    logger.write(lines)
 
 
 def main() -> int:
@@ -785,6 +866,9 @@ def main() -> int:
     if args.limit:
         videos = videos[:args.limit]
     tasks = build_tasks(videos, input_root, output_root, mode)
+    stats = BatchStats()
+    volume_paths = [input_root, output_root]
+    start_free_space: dict[str, int] = {}
 
     print(f"Input:      {input_root}")
     print(f"Output:     {output_root}")
@@ -799,22 +883,28 @@ def main() -> int:
     print()
     if not tasks:
         print("No supported video files were found.")
+        emit_terminal_result("complete", stats, args.delete_originals, start_free_space, volume_paths)
         return 0
     if args.delete_originals and args.dry_run:
         print("NOTE: Dry-run mode never deletes files.\n")
     elif args.delete_originals and not confirm_deletion(input_root, len(tasks)):
         print("Cancelled. No files were changed.")
+        emit_terminal_result("cancelled", stats, args.delete_originals, start_free_space, volume_paths)
         return 0
 
     logger: BatchLogger | None = None
-    stats = BatchStats()
     try:
         if not args.dry_run:
             try:
                 output_root.mkdir(parents=True, exist_ok=True)
             except OSError as error:
                 print(f"ERROR: Cannot create output folder: {error}", file=sys.stderr)
+                emit_terminal_result(
+                    "complete-with-issues", stats, args.delete_originals,
+                    start_free_space, volume_paths,
+                )
                 return 2
+            start_free_space = observe_free_space(volume_paths)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             logger = BatchLogger(
                 output_root / f"compression_log_{timestamp}.txt",
@@ -838,6 +928,7 @@ def main() -> int:
                 if logger:
                     logger.write([f"FAILED TO INSPECT: {task.source}: {error}"])
                 stats.failed += 1
+                mark_original_kept(args, stats)
                 continue
             print(f"  Source: {format_size(source_stat.st_size)} - {describe_media(source_info)}")
             if fps_cap is not None and source_info.fps > fps_cap + 0.01:
@@ -857,6 +948,7 @@ def main() -> int:
                     if logger:
                         logger.write([f"INVALID EXISTING: {task.destination}", *validation_errors])
                     stats.failed += 1
+                    mark_original_kept(args, stats)
                     continue
                 output_size = task.destination.stat().st_size
                 print(f"  VERIFIED EXISTING: {format_size(output_size)}, video and audio checks passed.")
@@ -875,6 +967,7 @@ def main() -> int:
             if mode.name != "editing" and output_is_efficient(source_info) and not args.recompress_efficient:
                 print(f"  SKIPPED: {source_info.video_codec} is already efficiently compressed.\n")
                 stats.efficient_skipped += 1
+                mark_original_kept(args, stats)
                 if logger:
                     logger.write([f"SKIPPED EFFICIENT: {task.source} ({source_info.video_codec})"])
                 continue
@@ -883,6 +976,7 @@ def main() -> int:
             if args.dry_run:
                 action = "would overwrite" if task.destination.exists() else "would encode"
                 print(f"  DRY RUN: {action}; no files changed.\n")
+                mark_original_kept(args, stats)
                 continue
 
             assert logger is not None
@@ -899,6 +993,7 @@ def main() -> int:
                 print(f"  FAILED: Cannot prepare the output path: {error}\n")
                 logger.write([f"FAILED PREPARING OUTPUT: {task.source}: {error}"])
                 stats.failed += 1
+                mark_original_kept(args, stats)
                 continue
             if free_space < source_stat.st_size:
                 print(
@@ -914,11 +1009,17 @@ def main() -> int:
             except KeyboardInterrupt:
                 print("\nStopped by user. Completed outputs are safe; originals are unchanged unless noted.")
                 logger.write(["STOPPED: Interrupted by user"])
+                print_summary(stats, logger)
+                emit_terminal_result(
+                    "stopped", stats, args.delete_originals,
+                    start_free_space, volume_paths, logger,
+                )
                 return 130
             except OSError as error:
                 print(f"  FAILED: Could not start HandBrakeCLI: {error}\n")
                 logger.write([f"FAILED: {task.source}: {error}"])
                 stats.failed += 1
+                mark_original_kept(args, stats)
                 continue
             if return_code != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
                 print(f"  FAILED: HandBrake exited with code {return_code}.")
@@ -926,6 +1027,7 @@ def main() -> int:
                 print()
                 logger.write([f"FAILED: {task.source}: exit code {return_code}"])
                 stats.failed += 1
+                mark_original_kept(args, stats)
                 continue
             try:
                 output_info = probe_media(temporary, ffprobe, handbrake)
@@ -939,6 +1041,7 @@ def main() -> int:
                 print(f"  Partial output retained for inspection: {temporary}\n")
                 logger.write([f"VALIDATION FAILED: {task.source}", *validation_errors])
                 stats.failed += 1
+                mark_original_kept(args, stats)
                 continue
             output_size = temporary.stat().st_size
             if (
@@ -958,6 +1061,7 @@ def main() -> int:
                 print("  Original kept.\n")
                 logger.write([f"DISCARDED LARGER OUTPUT: {task.source} ({increase:.1f}% larger)"])
                 stats.no_benefit += 1
+                mark_original_kept(args, stats)
                 continue
             try:
                 temporary.replace(task.destination)
@@ -965,6 +1069,7 @@ def main() -> int:
                 print(f"  FAILED: Could not finalize validated output: {error}\n")
                 logger.write([f"FAILED FINALIZING OUTPUT: {temporary}: {error}"])
                 stats.failed += 1
+                mark_original_kept(args, stats)
                 continue
             try:
                 os.utime(task.destination, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
@@ -993,15 +1098,22 @@ def main() -> int:
                 source_stat.st_mtime_ns, output_size, stats, logger, True, ffmpeg, output_info,
             )
             if not deleted:
-                stats.disk_change -= output_size
                 print("  Original kept.\n")
 
         if args.dry_run:
             print("Dry run complete. No files were changed.")
+            emit_terminal_result(
+                "complete", stats, args.delete_originals,
+                start_free_space, volume_paths, logger,
+            )
             return 0
         assert logger is not None
-        print_summary(stats, logger, originals_kept_by_default=not args.delete_originals)
+        print_summary(stats, logger)
         print("\nAll counted outputs passed video, duration, and audio-track validation.")
+        outcome = "complete-with-issues" if stats.failed else "complete"
+        emit_terminal_result(
+            outcome, stats, args.delete_originals, start_free_space, volume_paths, logger,
+        )
         return 1 if stats.failed else 0
     finally:
         if logger:
