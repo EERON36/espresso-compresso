@@ -21,8 +21,8 @@ param(
     [string]$FfmpegSourceSha256 = "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
 
     [string]$PythonCommand = "py",
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot "..\release"),
-    [string]$WorkDirectory = (Join-Path $PSScriptRoot "..\.release-build"),
+    [string]$OutputDirectory,
+    [string]$WorkDirectory,
     [switch]$KeepWorkDirectory
 )
 
@@ -37,6 +37,12 @@ $PinnedFfmpegArchiveSha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c1
 $PinnedFfmpegSourceUrl = "https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz"
 $PinnedFfmpegSourceSha256 = "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
 $SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $SourceRoot "release"
+}
+if ([string]::IsNullOrWhiteSpace($WorkDirectory)) {
+    $WorkDirectory = Join-Path $SourceRoot ".release-build"
+}
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $WorkDirectory = [System.IO.Path]::GetFullPath($WorkDirectory)
 $VenvDirectory = Join-Path $WorkDirectory "venv"
@@ -149,11 +155,12 @@ try {
         & $Python -m PyInstaller --noconfirm --clean --onedir --windowed --contents-directory _internal `
             --name "Espresso Compresso" --icon $IconPath --version-file (Join-Path $SourceRoot "packaging\version_info.txt") `
             --add-data "$StagedTools;tools" --distpath $GuiBuildDirectory --workpath (Join-Path $WorkDirectory "pyinstaller-gui") `
+            --specpath $WorkDirectory `
             "espresso_compresso.py"
         if ($LASTEXITCODE -ne 0) { throw "PyInstaller GUI build failed." }
         & $Python -m PyInstaller --noconfirm --clean --onedir --console --contents-directory _internal `
             --name "Espresso Compresso Worker" --icon $IconPath --version-file (Join-Path $SourceRoot "packaging\version_info_worker.txt") `
-            --distpath $WorkerBuildDirectory --workpath (Join-Path $WorkDirectory "pyinstaller-worker") `
+            --distpath $WorkerBuildDirectory --workpath (Join-Path $WorkDirectory "pyinstaller-worker") --specpath $WorkDirectory `
             "espresso_compresso_worker.py"
         if ($LASTEXITCODE -ne 0) { throw "PyInstaller worker build failed." }
     }
@@ -199,7 +206,7 @@ try {
     Get-ChildItem -LiteralPath $ReleaseRoot -Recurse -File |
         Sort-Object FullName |
         ForEach-Object {
-            $relative = $_.FullName.Substring($ReleaseRoot.Length + 1).Replace("\\", "/")
+            $relative = $_.FullName.Substring($ReleaseRoot.Length + 1).Replace("\", "/")
             "$(Get-Sha256 $_.FullName)  $relative"
         } | Set-Content -LiteralPath $ChecksumPath -Encoding utf8
     $ZipPath = Join-Path $OutputDirectory $AssetName
