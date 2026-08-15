@@ -86,9 +86,10 @@ def activity_from_output(line: str) -> str | None:
         existing = int(result.get("existing_verified", 0))
         skipped = int(result.get("no_benefit", 0))
         failed = int(result.get("failed", 0))
+        smaller_label = "original already smaller" if skipped == 1 else "originals already smaller"
         return (
             f"Finished: {encoded} compressed • {existing} already complete • "
-            f"{skipped} no-size-benefit • {failed} need attention"
+            f"{skipped} {smaller_label} • {failed} need attention"
         )
     file_match = re.match(r"\[(\d+)/(\d+)\]\s+(.+)", value)
     if file_match:
@@ -141,7 +142,7 @@ def removal_result_message(result: dict[str, object] | None) -> tuple[str, str, 
     if result is None:
         return (
             "Original removal results",
-            "Disk-space change could not be confirmed. Review Details for the final log.",
+            "Disk-space change could not be confirmed. Open the technical log for the final record.",
             True,
         )
     deleted = int(result.get("originals_deleted", 0))
@@ -157,7 +158,7 @@ def removal_result_message(result: dict[str, object] | None) -> tuple[str, str, 
         lines.insert(0, "Some files need attention.")
     volumes = result.get("free_space_volumes", [])
     if not isinstance(volumes, list) or not volumes:
-        lines.append("Disk-space change could not be confirmed. Review Details.")
+        lines.append("Disk-space change could not be confirmed. Open the technical log.")
         needs_attention = True
         title = "Original removal results"
     else:

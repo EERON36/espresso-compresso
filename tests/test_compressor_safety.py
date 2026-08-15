@@ -95,8 +95,12 @@ class CompressorSafetyTests(unittest.TestCase):
         })
         self.assertEqual(
             activity_from_output(result_line),
-            "Finished: 2 compressed • 1 already complete • 1 no-size-benefit • 0 need attention",
+            "Finished: 2 compressed • 1 already complete • 1 original already smaller • 0 need attention",
         )
+        plural_result_line = "RESULT_JSON: " + cli.json.dumps({
+            "encoded": 0, "existing_verified": 0, "no_benefit": 2, "failed": 0,
+        })
+        self.assertIn("2 originals already smaller", activity_from_output(plural_result_line) or "")
         self.assertEqual(
             technical_log_path_from_output("  Log: C:\\Logs\\compression_log_20260815_132017.txt"),
             Path("C:\\Logs\\compression_log_20260815_132017.txt"),
