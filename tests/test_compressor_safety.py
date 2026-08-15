@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import espresso_compresso_cli as cli
 from espresso_compresso import (
+    action_bar_grid_positions,
     activity_from_output,
     deletion_choice_for_scope,
     parse_terminal_result,
@@ -46,6 +47,16 @@ def media(*, fps: float = 30.0, duration: float = 60.0) -> MediaInfo:
 
 
 class CompressorSafetyTests(unittest.TestCase):
+    def test_action_bar_reflows_at_narrow_width_without_changing_button_order(self) -> None:
+        self.assertEqual(
+            action_bar_grid_positions(520),
+            {"start": (0, 0), "stop": (0, 1), "log": (1, 0), "results": (1, 1)},
+        )
+        self.assertEqual(
+            action_bar_grid_positions(700),
+            {"start": (0, 0), "stop": (0, 1), "log": (0, 3), "results": (0, 4)},
+        )
+
     def test_child_process_options_hide_windows_tools_and_keep_groups(self) -> None:
         ordinary = child_process_options("nt")
         grouped = child_process_options("nt", grouped=True)

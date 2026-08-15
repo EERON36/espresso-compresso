@@ -118,6 +118,19 @@ def activity_from_output(line: str) -> str | None:
     return None
 
 
+def action_bar_grid_positions(width: int) -> dict[str, tuple[int, int]]:
+    """Keep the action buttons readable at the app's minimum width."""
+    if width < 700:
+        return {
+            "start": (0, 0), "stop": (0, 1),
+            "log": (1, 0), "results": (1, 1),
+        }
+    return {
+        "start": (0, 0), "stop": (0, 1),
+        "log": (0, 3), "results": (0, 4),
+    }
+
+
 def deletion_choice_for_scope(scope: str, requested: str) -> str:
     """The three-file test is always non-destructive."""
     return "delete" if scope == "all" and requested == "delete" else "keep"
@@ -685,27 +698,56 @@ class CompressorApp:
         self.output_button.grid(row=1, column=1, padx=(9, 0), pady=(5, 11), ipady=2)
 
     def _build_action_bar(self, parent: tk.Widget) -> None:
-        bar = tk.Frame(parent, bg=Palette.BACKGROUND)
-        bar.grid(row=5, column=0, sticky="ew", pady=(1, 10))
+        self.action_bar = tk.Frame(parent, bg=Palette.BACKGROUND)
+        self.action_bar.grid(row=5, column=0, sticky="ew", pady=(1, 10))
         self.start_button = self._button(
-            bar, "Compresso", self._start_job, Palette.ORANGE, font_size=12,
+            self.action_bar, "Compresso", self._start_job, Palette.ORANGE, font_size=12,
         )
-        self.start_button.pack(side="left", ipadx=12, ipady=7)
         self.stop_button = self._button(
-            bar, "STOP", self._stop_job, Palette.RED, font_size=11,
+            self.action_bar, "STOP", self._stop_job, Palette.RED, font_size=11,
         )
         self.stop_button.configure(state="disabled", bg=Palette.MUTED)
-        self.stop_button.pack(side="left", padx=(9, 0), ipady=5)
         self.open_button = self._button(
-            bar, "OPEN RESULTS", self._open_output, Palette.BLUE, font_size=10,
+            self.action_bar, "OPEN RESULTS", self._open_output, Palette.BLUE, font_size=10,
         )
         self.open_button.configure(state="disabled", bg=Palette.MUTED)
-        self.open_button.pack(side="right", ipady=4)
         self.open_log_button = self._button(
-            bar, "OPEN TECHNICAL LOG", self._open_technical_log, Palette.BLUE, font_size=10,
+            self.action_bar, "OPEN TECHNICAL LOG", self._open_technical_log, Palette.BLUE, font_size=10,
         )
         self.open_log_button.configure(state="disabled", bg=Palette.MUTED)
-        self.open_log_button.pack(side="right", padx=(0, 8), ipady=4)
+        self._layout_action_bar(self.root.winfo_width())
+
+    def _layout_action_bar(self, width: int) -> None:
+        positions = action_bar_grid_positions(width)
+        buttons = {
+            "start": self.start_button,
+            "stop": self.stop_button,
+            "log": self.open_log_button,
+            "results": self.open_button,
+        }
+        narrow = width < 700
+        for column in range(5):
+            self.action_bar.grid_columnconfigure(
+                column,
+                weight=1 if narrow and column < 2 else (1 if not narrow and column == 2 else 0),
+                uniform="action" if narrow and column < 2 else "",
+            )
+        for name, button in buttons.items():
+            row, column = positions[name]
+            if narrow:
+                button.grid_configure(
+                    row=row, column=column, sticky="ew",
+                    padx=(0, 5) if column == 0 else (5, 0),
+                    pady=(0, 6) if row == 0 else 0,
+                    ipady=5,
+                )
+            else:
+                button.grid_configure(
+                    row=row, column=column, sticky="w" if name in {"start", "stop"} else "e",
+                    padx=(0, 9) if name == "start" else (9, 0) if name == "stop" else (0, 8) if name == "log" else 0,
+                    pady=0,
+                    ipady=7 if name == "start" else 5 if name == "stop" else 4,
+                )
 
     def _build_progress_card(self, parent: tk.Widget) -> None:
         card = self._card(parent)
@@ -1478,6 +1520,7 @@ class CompressorApp:
         self.queue_summary_label.configure(wraplength=wraplength)
         self.result_count_label.configure(wraplength=wraplength)
         self.result_space_label.configure(wraplength=wraplength)
+        self._layout_action_bar(event.width)
         if event.width < 700:
             self.mode_row.grid_columnconfigure(0, weight=1, uniform="mode")
             self.mode_row.grid_columnconfigure(1, weight=0, uniform="")
